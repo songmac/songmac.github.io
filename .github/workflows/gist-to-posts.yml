@@ -1,0 +1,89 @@
+name: Gists to Jekyll Posts
+
+on:
+  schedule:
+    - cron: "7 0 * * *"    # 매일 00:07 UTC
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests pyyaml markdown
+
+      - name: Generate posts from Gists
+        env:
+          GH_USER: songmac
+          # 비공개/시크릿 Gist까지 포함하려면 아래 주석 해제하고 레포 시크릿에 PAT 저장:
+          # GH_TOKEN: ${{ secrets.GH_GISTS_TOKEN }}
+        run: |
+          python - << 'PY'
+          import os, re, yaml, pathlib, requests
+          USER = os.environ["GH_USER"]
+          TOKEN = os.environ.get("GH_TOKEN")  # 선택
+          POSTS = pathlib.Path("_posts"); POSTS.mkdir(exist_ok=True)
+          HEADERS = {"Accept":"application/vnd.github+json"}
+          if TOKEN: HEADERS["Authorization"] = f"Bearer {TOKEN}"
+
+          def fetch(url, params=None):
+            r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+            r.raise_for_status()
+            return r
+
+          page = 1
+          while True:
+            data = fetch(f"https://api.github.com/users/{USER}/gists", {"page":page,"per_page":100}).json()
+            if not data: break
+            for g in data:
+              files = g.get("files") or {}
+              md = next((v for v in files.values() if v["filename"].lower().endswith(".md")), None)
+              if not md: continue
+              raw = fetch(md["raw_url"]).text
+              m = re.search(r"^#\s+(.+)$", raw, re.M)
+              title = (m.group(1).strip() if m else md["filename"].rsplit(".",1)[0])
+              updated = g["updated_at"][:10]
+              slug = re.sub(r"[^a-z0-9\-]+","-", title.lower()).strip("-") or g["id"]
+              fm = {
+                "layout": "post",
+                "title": title,
+                "gist_id": g["id"],
+                "original_gist": f"https://gist.github.com/{USER}/{g['id']}"
+              }
+              name = f"{updated}-{slug}.md"
+              path = POSTS / name
+              if raw.lstrip().startswith("---"):
+                content = raw
+              else:
+                content = f"---\n{yaml.safe_dump(fm, allow_unicode=True, sort_keys=False)}---\n\n{raw}"
+              path.write_text(content, encoding="utf-8")
+            page += 1
+          PY
+
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: .
+          destination: ./_site
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
