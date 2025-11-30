@@ -2,7 +2,7 @@ name: Gists to Jekyll Posts
 
 on:
   schedule:
-    - cron: "7 0 * * *" # 매일 00:07 UTC
+    - cron: "7 0 * * *"
   workflow_dispatch:
   push:
     branches: [main]
@@ -14,6 +14,7 @@ jobs:
       contents: write
       pages: write
       id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,56 +24,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install Python deps
         run: pip install requests pyyaml markdown
 
       - name: Generate posts from Gists
         env:
           GH_USER: songmac
-          # 비공개/시크릿 Gist까지 포함하려면 아래 주석 해제하고 레포 시크릿에 PAT 저장:
-          # GH_TOKEN: ${{ secrets.GH_GISTS_TOKEN }}
         run: |
-          python - << 'PY'
-          import os, re, yaml, pathlib, requests
-          USER = os.environ["GH_USER"]
-          TOKEN = os.environ.get("GH_TOKEN")  # 선택
-          POSTS = pathlib.Path("_posts"); POSTS.mkdir(exist_ok=True)
-          HEADERS = {"Accept":"application/vnd.github+json"}
-          if TOKEN: HEADERS["Authorization"] = f"Bearer {TOKEN}"
-
-          def fetch(url, params=None):
-            r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-            r.raise_for_status()
-            return r
-
-          page = 1
-          while True:
-            data = fetch(f"https://api.github.com/users/{USER}/gists", {"page":page,"per_page":100}).json()
-            if not data: break
-            for g in data:
-              files = g.get("files") or {}
-              md = next((v for v in files.values() if v["filename"].lower().endswith(".md")), None)
-              if not md: continue
-              raw = fetch(md["raw_url"]).text
-              m = re.search(r"^#\s+(.+)$", raw, re.M)
-              title = (m.group(1).strip() if m else md["filename"].rsplit(".",1)[0])
-              updated = g["updated_at"][:10]
-              slug = re.sub(r"[^a-z0-9\-]+","-", title.lower()).strip("-") or g["id"]
-              fm = {
-                "layout": "post",
-                "title": title,
-                "gist_id": g["id"],
-                "original_gist": f"https://gist.github.com/{USER}/{g['id']}"
-              }
-              name = f"{updated}-{slug}.md"
-              path = POSTS / name
-              if raw.lstrip().startswith("---"):
-                content = raw
-              else:
-                content = f"---\n{yaml.safe_dump(fm, allow_unicode=True, sort_keys=False)}---\n\n{raw}"
-              path.write_text(content, encoding="utf-8")
-            page += 1
-          PY
+          python scripts/gist_posting.py
 
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@v1
@@ -87,63 +46,3 @@ jobs:
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
-
-      - name: Cross-post to Naver & Tistory
-        if: ${{ github.event_name != 'schedule' || true }} # 예시: 스케줄에도 허용
-        env:
-          NAVER_ACCESS_TOKEN: ${{ secrets.NAVER_ACCESS_TOKEN }}
-          TISTORY_ACCESS_TOKEN: ${{ secrets.TISTORY_ACCESS_TOKEN }}
-          TISTORY_BLOG_NAME: ${{ secrets.TISTORY_BLOG_NAME }}
-        run: |
-          python - << 'PY'
-          import os, glob, re, requests, urllib.parse, pathlib
-          POSTS = sorted(glob.glob("_posts/*.md"))
-          if not POSTS:
-            raise SystemExit("No posts found")
-          last = pathlib.Path(POSTS[-1])
-          text = last.read_text(encoding="utf-8")
-          # 가장 단순한 방식: 제목(H1)과 본문 분리
-          m = re.search(r"^title:\s*\"?(.+?)\"?\s*$", text, re.M)
-          title = m.group(1) if m else last.stem
-          # front matter 제거
-          content = re.sub(r"^---[\\s\\S]*?---\\s*", "", text, count=1, flags=re.M)
-          # 마크다운 그대로 전송(티스토리는 HTML/Markdown 모두 허용 옵션이 있음. 기본은 HTML이 편함)
-          html_content = content  # 필요시 Markdown→HTML 변환 추가 가능
-
-          # ---- Tistory ----
-          TISTORY_TOKEN = os.getenv("TISTORY_ACCESS_TOKEN")
-          BLOG_NAME = os.getenv("TISTORY_BLOG_NAME")
-          if TISTORY_TOKEN and BLOG_NAME:
-            url = "https://www.tistory.com/apis/post/write"
-            data = {
-              "access_token": TISTORY_TOKEN,
-              "output": "json",
-              "blogName": BLOG_NAME,
-              "title": title,
-              "content": html_content,
-              "visibility": 3,  # 3 공개, 2 보호, 0 비공개
-            }
-            try:
-              r = requests.post(url, data=data, timeout=30)
-              r.raise_for_status()
-              print("Posted to Tistory:", r.json())
-            except Exception as e:
-              print("Tistory post failed:", e)
-
-          # ---- Naver Blog ----
-          NAVER_TOKEN = os.getenv("NAVER_ACCESS_TOKEN")
-          if NAVER_TOKEN:
-            # 네이버는 JSON/HTML 본문 업로드 엔드포인트를 제공. 가장 단순한 writePost 예시:
-            url = "https://openapi.naver.com/blog/writePost.json"
-            headers = {"Authorization": f"Bearer {NAVER_TOKEN}"}
-            data = {
-              "title": title,
-              "contents": html_content,  # HTML 권장
-            }
-            try:
-              r = requests.post(url, headers=headers, data=data, timeout=30)
-              r.raise_for_status()
-              print("Posted to Naver:", r.json())
-            except Exception as e:
-              print("Naver post failed:", e)
-          PY
